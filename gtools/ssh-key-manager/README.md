@@ -6,6 +6,12 @@ Keys are created at `~/.ssh/<namespace>/<key-name>/id_ed25519`.
 
 ## Install
 
+**Via curl:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/OppOops/my-tools/refs/heads/main/gtools/ssh-key-manager/install.sh | bash
+```
+
 **From this repo:**
 
 ```bash
@@ -28,19 +34,19 @@ ssh-key-manager
 
 ```bash
 # Fully interactive (prompts for namespace + key name)
-./ssh-key-manager.sh
+ssh-key-manager
 
 # Key name as argument, namespace prompt pre-filled with "work"
-./ssh-key-manager.sh github
+ssh-key-manager github
 
 # Explicit namespace via flag (skips prompt)
-./ssh-key-manager.sh -n personal github
+ssh-key-manager -n personal github
 
 # With comment
-./ssh-key-manager.sh -n work github -C "work laptop"
+ssh-key-manager -n work github -C "work laptop"
 
 # Override default namespace via env var
-GTOOLS_SSH_NAMESPACE=clients ./ssh-key-manager.sh acme
+GTOOLS_SSH_NAMESPACE=clients ssh-key-manager acme
 ```
 
 ## Options
