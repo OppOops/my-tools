@@ -143,3 +143,7 @@ gum style \
   "" \
   "Private key : ${KEY_FILE}" \
   "Public key  : ${KEY_FILE}.pub"
+
+echo ""
+gum style --foreground 8 "Public key content:"
+cat "${KEY_FILE}.pub"
