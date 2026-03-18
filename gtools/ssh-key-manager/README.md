@@ -52,17 +52,40 @@ skey create -n work github -C "work laptop"
 GTOOLS_SSH_NAMESPACE=clients skey create acme
 ```
 
-### Configure a namespace
+### Show workspace status
 
 ```bash
-# Set up namespace config and update ~/.ssh/config
+skey status
+```
+
+Shows all registered namespaces and their keys, any unregistered namespace directories, and whether `~/.ssh/config` is in sync.
+
+### Configure a namespace or key
+
+```bash
+# Register a namespace and update ~/.ssh/config
 skey config
 
 # For a specific namespace
 skey config -n personal
+
+# Configure a specific key — runs SSH connection wizard
+skey config -n work github
 ```
 
-This creates `~/.ssh/<namespace>/.skey-config.yaml` and adds an `Include` entry for it inside a managed block in `~/.ssh/config`.
+When a key name is given, `skey config` prompts for the SSH connection details (`hostname`, `user`, `port`, etc.) and stores them in `~/.ssh/<namespace>/<key-name>/.config.yaml`. The `~/.ssh/config` managed block is then regenerated with real `Host` entries:
+
+```
+Host work-github
+  HostName github.com
+  User git
+  Port 22
+  IdentityFile ~/.ssh/work/github/id_ed25519
+  ForwardAgent no
+  ServerAliveInterval 60
+```
+
+The `Host` alias is auto-derived as `<namespace>-<key-name>` to avoid conflicts.
 
 ## Options
 
@@ -75,9 +98,10 @@ This creates `~/.ssh/<namespace>/.skey-config.yaml` and adds an `Include` entry 
 
 ### config
 
-| Flag | Description |
+| Flag/Arg | Description |
 |---|---|
 | `-n <namespace>` | Namespace to configure (overrides env var and default) |
+| `[key-name]` | If given, run per-key SSH config wizard |
 
 ## Configuration
 
