@@ -1,8 +1,9 @@
-# ssh-key-manager
+# skey
 
-Interactive TUI for creating SSH keys, built with bash + [gum](https://github.com/charmbracelet/gum).
+Interactive TUI for managing SSH keys, built with bash + [gum](https://github.com/charmbracelet/gum).
 
 Keys are created at `~/.ssh/<namespace>/<key-name>/id_ed25519`.
+Namespace configs are tracked in `~/.ssh/.skey.yaml` and wired into `~/.ssh/config` automatically.
 
 ## Install
 
@@ -15,14 +16,14 @@ curl -fsSL https://raw.githubusercontent.com/OppOops/my-tools/refs/heads/main/gt
 **From this repo:**
 
 ```bash
-./install.sh                  # installs to ~/.local/bin/ssh-key-manager
+./install.sh                  # installs to ~/.local/bin/skey
 ./install.sh /usr/local/bin   # installs system-wide (may need sudo)
 ```
 
 Then run as:
 
 ```bash
-ssh-key-manager
+skey
 ```
 
 ## Requirements
@@ -32,29 +33,51 @@ ssh-key-manager
 
 ## Usage
 
+### Create a key
+
 ```bash
 # Fully interactive (prompts for namespace + key name)
-ssh-key-manager
+skey create
 
 # Key name as argument, namespace prompt pre-filled with "work"
-ssh-key-manager github
+skey create github
 
 # Explicit namespace via flag (skips prompt)
-ssh-key-manager -n personal github
+skey create -n personal github
 
 # With comment
-ssh-key-manager -n work github -C "work laptop"
+skey create -n work github -C "work laptop"
 
 # Override default namespace via env var
-GTOOLS_SSH_NAMESPACE=clients ssh-key-manager acme
+GTOOLS_SSH_NAMESPACE=clients skey create acme
 ```
 
+### Configure a namespace
+
+```bash
+# Set up namespace config and update ~/.ssh/config
+skey config
+
+# For a specific namespace
+skey config -n personal
+```
+
+This creates `~/.ssh/<namespace>/.skey-config.yaml` and adds an `Include` entry for it inside a managed block in `~/.ssh/config`.
+
 ## Options
+
+### create
 
 | Flag | Description |
 |---|---|
 | `-n <namespace>` | Set namespace (overrides env var and default) |
 | `-C <comment>` | Add a comment to the key (forwarded to `ssh-keygen`) |
+
+### config
+
+| Flag | Description |
+|---|---|
+| `-n <namespace>` | Namespace to configure (overrides env var and default) |
 
 ## Configuration
 

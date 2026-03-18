@@ -2,11 +2,11 @@
 set -euo pipefail
 
 INSTALL_DIR="${1:-$HOME/.local/bin}"
-SCRIPT_NAME="ssh-key-manager"
-SCRIPT_SRC="$(cd "$(dirname "$0")" && pwd)/ssh-key-manager.sh"
+SCRIPT_NAME="skey"
+SCRIPT_SRC="$(cd "$(dirname "$0")" && pwd)/skey.sh"
 
 if [[ ! -f "$SCRIPT_SRC" ]]; then
-  echo "Error: ssh-key-manager.sh not found at ${SCRIPT_SRC}" >&2
+  echo "Error: skey.sh not found at ${SCRIPT_SRC}" >&2
   exit 1
 fi
 
