@@ -179,7 +179,8 @@ cmd_help() {
     "" \
     "SUBCOMMANDS" \
     "  create [flags] [key-name]          Create a new SSH key" \
-    "  config [-n <ns>] [key-name]        Configure namespace or specific key" \
+    "  config [-n <ns>] [key-name]        Configure namespace or key (picker if no args)" \
+    "  git-remote [-r <remote>]           Rewrite git remote URL to use skey alias" \
     "  status                             Show workspace overview" \
     "  help                               Show this help" \
     "" \
@@ -190,6 +191,9 @@ cmd_help() {
     "CONFIG FLAGS" \
     "  -n <namespace>   Namespace (default: \$GTOOLS_SSH_NAMESPACE or 'work')" \
     "  [key-name]       If given, run per-key SSH config wizard" \
+    "" \
+    "GIT-REMOTE FLAGS" \
+    "  -r <remote>      Remote name to rewrite (default: origin)" \
     "" \
     "ENVIRONMENT" \
     "  GTOOLS_SSH_NAMESPACE   Default namespace when -n is not given"
@@ -291,6 +295,47 @@ cmd_config() {
       *) key_name_arg="$1"; shift ;;
     esac
   done
+
+  # Workspace picker: no -n flag and no key-name argument → let user choose from known keys
+  if [[ -z "$namespace_flag" && -z "$key_name_arg" && -f "$SKEY_STATE_FILE" ]]; then
+    local -a picker_items=()
+    local ns_pick=""
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^[[:space:]]{2}([a-zA-Z0-9_-]+):$ ]]; then
+        ns_pick="${BASH_REMATCH[1]}"
+      fi
+      [[ -z "$ns_pick" ]] && continue
+    done < "$SKEY_STATE_FILE"
+    # Walk all registered namespaces for key dirs
+    local current_ns=""
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^[[:space:]]{2}([a-zA-Z0-9_-]+):$ ]]; then
+        current_ns="${BASH_REMATCH[1]}"
+        continue
+      fi
+      [[ -z "$current_ns" ]] && continue
+    done < "$SKEY_STATE_FILE"
+    # Collect all namespace/key items
+    while IFS= read -r ns_line; do
+      if [[ "$ns_line" =~ ^[[:space:]]{2}([a-zA-Z0-9_-]+):$ ]]; then
+        local cur_ns="${BASH_REMATCH[1]}"
+        for key_dir in "$HOME/.ssh/${cur_ns}"/*/; do
+          [[ -f "${key_dir}id_ed25519" ]] || continue
+          picker_items+=("${cur_ns}/$(basename "$key_dir")")
+        done
+      fi
+    done < "$SKEY_STATE_FILE"
+
+    if [[ ${#picker_items[@]} -eq 0 ]]; then
+      gum style --foreground 3 "No keys found in workspace. Run 'skey create' first."
+      exit 0
+    fi
+
+    local selection
+    selection="$(printf '%s\n' "${picker_items[@]}" | gum choose --header "Select key to configure:" | tr -d '\r')"
+    namespace_flag="${selection%%/*}"
+    key_name_arg="${selection##*/}"
+  fi
 
   local namespace
   namespace="$(resolve_namespace "$namespace_flag" "$( [[ -z "$namespace_flag" ]] && printf true || printf false )")"
@@ -463,6 +508,119 @@ cmd_status() {
 }
 
 # ===========================================================================
+# cmd_git_remote
+# ===========================================================================
+
+cmd_git_remote() {
+  local remote="origin"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -r) remote="${2:-}"; shift 2 ;;
+      -*) printf 'Error: Unknown flag: %s\n' "$1" >&2; exit 1 ;;
+      *) printf 'Error: Unexpected argument: %s\n' "$1" >&2; exit 1 ;;
+    esac
+  done
+
+  # 2.2 — must be inside a git repo
+  if ! git rev-parse --is-inside-work-tree &>/dev/null; then
+    gum style --foreground 3 "Not a git repository. Skipping."
+    exit 0
+  fi
+
+  # 2.3 — remote URL must exist
+  local remote_url
+  if ! remote_url="$(git remote get-url "$remote" 2>/dev/null)"; then
+    gum style --foreground 3 "Remote '${remote}' not found. Skipping."
+    exit 0
+  fi
+
+  # 2.4 — skip non-SSH URLs
+  if [[ "$remote_url" =~ ^https?:// ]]; then
+    gum style --foreground 3 "Remote URL is not SSH. Skipping."
+    exit 0
+  fi
+
+  # 2.5 — extract hostname from SCP-style or ssh:// URL
+  local hostname=""
+  local url_path=""
+  local url_user=""
+  local url_style=""
+
+  if [[ "$remote_url" =~ ^ssh://([^@]+@)?([^/]+)(/.+)$ ]]; then
+    url_style="ssh"
+    url_user="${BASH_REMATCH[1]}"   # includes trailing @
+    hostname="${BASH_REMATCH[2]}"
+    url_path="${BASH_REMATCH[3]}"
+  elif [[ "$remote_url" =~ ^([^@]+@)?([^:]+):(.+)$ ]]; then
+    url_style="scp"
+    url_user="${BASH_REMATCH[1]}"   # includes trailing @
+    hostname="${BASH_REMATCH[2]}"
+    url_path="${BASH_REMATCH[3]}"
+  else
+    gum style --foreground 3 "Cannot parse remote URL: ${remote_url}. Skipping."
+    exit 0
+  fi
+
+  # 2.6 — find matching .config.yaml files by hostname
+  local -a matching_aliases=()
+  if [[ -f "$SKEY_STATE_FILE" ]]; then
+    local cur_ns=""
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^[[:space:]]{2}([a-zA-Z0-9_-]+):$ ]]; then
+        cur_ns="${BASH_REMATCH[1]}"
+        continue
+      fi
+      [[ -z "$cur_ns" ]] && continue
+      for key_config in "$HOME/.ssh/${cur_ns}"/*/.config.yaml; do
+        [[ -f "$key_config" ]] || continue
+        local cfg_host
+        cfg_host="$(yaml_get "$key_config" "hostname")"
+        if [[ "$cfg_host" == "$hostname" ]]; then
+          matching_aliases+=("$(yaml_get "$key_config" "alias")")
+        fi
+      done
+    done < "$SKEY_STATE_FILE"
+  fi
+
+  # 2.7 — no matches
+  if [[ ${#matching_aliases[@]} -eq 0 ]]; then
+    gum style --foreground 3 "No skey key found for hostname '${hostname}'. Skipping."
+    exit 0
+  fi
+
+  # 2.8 — single or multiple matches
+  local chosen_alias
+  if [[ ${#matching_aliases[@]} -eq 1 ]]; then
+    chosen_alias="${matching_aliases[0]}"
+  else
+    chosen_alias="$(printf '%s\n' "${matching_aliases[@]}" | gum choose --header "Multiple keys match '${hostname}'. Select alias:" | tr -d '\r')"
+  fi
+
+  # 2.9 — rewrite URL preserving format
+  local new_url
+  if [[ "$url_style" == "ssh" ]]; then
+    new_url="ssh://${url_user}${chosen_alias}${url_path}"
+  else
+    new_url="${url_user}${chosen_alias}:${url_path}"
+  fi
+
+  # 2.10 — apply
+  git remote set-url "$remote" "$new_url"
+
+  # 2.11 — success output
+  gum style \
+    --border rounded \
+    --padding "1 2" \
+    --foreground 2 \
+    "Git remote updated!" \
+    "" \
+    "Remote : ${remote}" \
+    "Before : ${remote_url}" \
+    "After  : ${new_url}"
+}
+
+# ===========================================================================
 # Subcommand router
 # ===========================================================================
 
@@ -472,6 +630,7 @@ shift || true
 case "$SUBCOMMAND" in
   create) cmd_create "$@" ;;
   config) cmd_config "$@" ;;
+  git-remote) cmd_git_remote "$@" ;;
   status) cmd_status ;;
   help|--help|-h) cmd_help ;;
   *) printf 'Error: Unknown subcommand "%s". Run "skey help" for usage.\n' "$SUBCOMMAND" >&2; exit 1 ;;
