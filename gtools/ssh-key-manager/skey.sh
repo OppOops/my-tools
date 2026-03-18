@@ -7,8 +7,8 @@ set -euo pipefail
 
 # gum dependency guard
 if ! command -v gum &>/dev/null; then
-  echo "Error: 'gum' is not installed." >&2
-  echo "Install it with: brew install gum  OR  go install github.com/charmbracelet/gum@latest" >&2
+  printf 'Error: gum is not installed.\n' >&2
+  printf 'Install it with: brew install gum  OR  go install github.com/charmbracelet/gum@latest\n' >&2
   exit 1
 fi
 
@@ -31,7 +31,6 @@ state_init() {
 
 state_get_config_path() {
   local namespace="$1"
-  # Parse: find the namespace block and extract its config value
   awk -v ns="$namespace" '
     /^  [^ ]/ { in_ns = ($0 ~ "^  " ns ":") }
     in_ns && /^    config:/ { gsub(/^    config: */, ""); print; exit }
@@ -41,10 +40,16 @@ state_get_config_path() {
 state_register() {
   local namespace="$1"
   local config_path="$2"
-  # Only append if namespace not already registered
   if ! grep -q "^  ${namespace}:" "$SKEY_STATE_FILE" 2>/dev/null; then
     printf '  %s:\n    config: %s\n' "$namespace" "$config_path" >> "$SKEY_STATE_FILE"
   fi
+}
+
+# Read a field value from a .config.yaml file (simple key: value parsing)
+yaml_get() {
+  local file="$1"
+  local key="$2"
+  grep "^${key}:" "$file" | sed "s/^${key}: *//" | tr -d '\r'
 }
 
 # ===========================================================================
@@ -60,18 +65,53 @@ ssh_config_ensure() {
 }
 
 ssh_config_build_block() {
-  # Build Include lines for all registered namespaces
-  local block=""
-  block+="${SENTINEL_START}"$'\n'
-  # Parse namespaces from state file
-  while IFS= read -r line; do
-    if [[ "$line" =~ ^[[:space:]]{4}config:[[:space:]]*(.*) ]]; then
-      local config_path="${BASH_REMATCH[1]}"
-      block+="Include ${config_path}"$'\n'
-    fi
-  done < "$SKEY_STATE_FILE"
+  local block="${SENTINEL_START}"$'\n'
+
+  # Walk registered namespaces and collect per-key .config.yaml files
+  if [[ -f "$SKEY_STATE_FILE" ]]; then
+    local current_ns=""
+    while IFS= read -r line; do
+      # Match namespace name lines (2-space indent + name:)
+      if [[ "$line" =~ ^[[:space:]]{2}([a-zA-Z0-9_-]+):$ ]]; then
+        current_ns="${BASH_REMATCH[1]}"
+        continue
+      fi
+      # Skip non-namespace lines
+      [[ -n "$current_ns" ]] || continue
+
+      local ns_dir="$HOME/.ssh/${current_ns}"
+      [[ -d "$ns_dir" ]] || continue
+
+      for key_config in "$ns_dir"/*/.config.yaml; do
+        [[ -f "$key_config" ]] || continue
+
+        local alias hostname user port identity_file forward_agent server_alive
+        alias="$(yaml_get "$key_config" "alias")"
+        hostname="$(yaml_get "$key_config" "hostname")"
+        user="$(yaml_get "$key_config" "user")"
+        port="$(yaml_get "$key_config" "port")"
+        identity_file="$(yaml_get "$key_config" "identity_file")"
+        forward_agent="$(yaml_get "$key_config" "forward_agent")"
+        server_alive="$(yaml_get "$key_config" "server_alive_interval")"
+
+        # Normalise forward_agent to yes/no
+        local fa_value="no"
+        [[ "$forward_agent" == "true" ]] && fa_value="yes"
+
+        block+="Host ${alias}"$'\n'
+        block+="  HostName ${hostname}"$'\n'
+        block+="  User ${user}"$'\n'
+        block+="  Port ${port}"$'\n'
+        block+="  IdentityFile ${identity_file}"$'\n'
+        block+="  ForwardAgent ${fa_value}"$'\n'
+        block+="  ServerAliveInterval ${server_alive}"$'\n'
+      done
+    done < "$SKEY_STATE_FILE"
+  fi
+
   block+="${SENTINEL_END}"
-  printf '%s' "$block"
+  # Strip any stray \r before returning
+  printf '%s' "$block" | tr -d '\r'
 }
 
 ssh_config_update() {
@@ -82,20 +122,17 @@ ssh_config_update() {
   tmp="$(mktemp)"
 
   if grep -q "$SENTINEL_START" "$SSH_CONFIG_FILE" 2>/dev/null; then
-    # Replace existing block in-place
     awk -v start="$SENTINEL_START" -v end="$SENTINEL_END" -v block="$new_block" '
       BEGIN { skip=0; inserted=0 }
       $0 == start { skip=1; if (!inserted) { print block; inserted=1 }; next }
       $0 == end   { skip=0; next }
       !skip        { print }
-    ' "$SSH_CONFIG_FILE" > "$tmp"
+    ' "$SSH_CONFIG_FILE" | tr -d '\r' > "$tmp"
   else
-    # Append block at end
     {
       cat "$SSH_CONFIG_FILE"
-      echo ""
-      echo "$new_block"
-    } > "$tmp"
+      printf '\n%s\n' "$new_block"
+    } | tr -d '\r' > "$tmp"
   fi
 
   mv "$tmp" "$SSH_CONFIG_FILE"
@@ -106,8 +143,8 @@ ssh_config_update() {
 # ===========================================================================
 
 resolve_namespace() {
-  local flag_value="$1"   # empty if -n not given
-  local interactive="$2"  # "true" or "false"
+  local flag_value="$1"
+  local interactive="$2"
 
   local resolved
   if [[ -n "$flag_value" ]]; then
@@ -115,12 +152,12 @@ resolve_namespace() {
   else
     resolved="${GTOOLS_SSH_NAMESPACE:-work}"
     if [[ "$interactive" == "true" ]]; then
-      resolved="$(gum input --prompt "Namespace: " --value "$resolved")"
+      resolved="$(gum input --prompt "Namespace: " --value "$resolved" | tr -d '\r')"
     fi
   fi
 
   if [[ ! "$resolved" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    echo "Error: Invalid namespace '${resolved}'. Use only letters, numbers, hyphens, and underscores." >&2
+    printf 'Error: Invalid namespace "%s". Use only letters, numbers, hyphens, and underscores.\n' "$resolved" >&2
     exit 1
   fi
 
@@ -141,16 +178,18 @@ cmd_help() {
     "  skey <subcommand> [flags] [args]" \
     "" \
     "SUBCOMMANDS" \
-    "  create [flags] [key-name]   Create a new SSH key" \
-    "  config [flags]              Set up namespace config and update ~/.ssh/config" \
-    "  help                        Show this help" \
+    "  create [flags] [key-name]          Create a new SSH key" \
+    "  config [-n <ns>] [key-name]        Configure namespace or specific key" \
+    "  status                             Show workspace overview" \
+    "  help                               Show this help" \
     "" \
     "CREATE FLAGS" \
     "  -n <namespace>   Namespace (default: \$GTOOLS_SSH_NAMESPACE or 'work')" \
     "  -C <comment>     Key comment forwarded to ssh-keygen" \
     "" \
     "CONFIG FLAGS" \
-    "  -n <namespace>   Namespace to configure (same default as create)" \
+    "  -n <namespace>   Namespace (default: \$GTOOLS_SSH_NAMESPACE or 'work')" \
+    "  [key-name]       If given, run per-key SSH config wizard" \
     "" \
     "ENVIRONMENT" \
     "  GTOOLS_SSH_NAMESPACE   Default namespace when -n is not given"
@@ -169,53 +208,47 @@ cmd_create() {
     case "$1" in
       -C) comment="${2:-}"; shift 2 ;;
       -n|--namespace) namespace_flag="${2:-}"; shift 2 ;;
-      -*) echo "Error: Unknown flag: $1" >&2; exit 1 ;;
+      -*) printf 'Error: Unknown flag: %s\n' "$1" >&2; exit 1 ;;
       *) key_name_arg="$1"; shift ;;
     esac
   done
 
   local namespace
-  namespace="$(resolve_namespace "$namespace_flag" "$( [[ -z "$namespace_flag" ]] && echo true || echo false )")"
+  namespace="$(resolve_namespace "$namespace_flag" "$( [[ -z "$namespace_flag" ]] && printf true || printf false )")"
 
-  # Key name
   local key_name
   if [[ -z "$key_name_arg" ]]; then
-    key_name="$(gum input --prompt "Key name: " --placeholder "ssh key name")"
+    key_name="$(gum input --prompt "Key name: " --placeholder "ssh key name" | tr -d '\r')"
   else
     key_name="$key_name_arg"
   fi
 
   if [[ ! "$key_name" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    echo "Error: Invalid key name '${key_name}'. Use only letters, numbers, hyphens, and underscores." >&2
+    printf 'Error: Invalid key name "%s". Use only letters, numbers, hyphens, and underscores.\n' "$key_name" >&2
     exit 1
   fi
 
-  # Path setup
   local ssh_dir="$HOME/.ssh"
   local namespace_dir="${ssh_dir}/${namespace}"
   local key_dir="${namespace_dir}/${key_name}"
   local key_file="${key_dir}/id_ed25519"
 
-  # Bootstrap ~/.ssh
   if [[ ! -d "$ssh_dir" ]]; then
     mkdir -p "$ssh_dir"
     chmod 700 "$ssh_dir"
   fi
 
-  # Bootstrap namespace dir
   if [[ ! -d "$namespace_dir" ]]; then
     mkdir -p "$namespace_dir"
     chmod 700 "$namespace_dir"
   fi
 
-  # No-overwrite guard
   if [[ -d "$key_dir" ]]; then
-    echo "Error: Key directory already exists: ${key_dir}" >&2
-    echo "Choose a different key name or namespace." >&2
+    printf 'Error: Key directory already exists: %s\n' "$key_dir" >&2
+    printf 'Choose a different key name or namespace.\n' >&2
     exit 1
   fi
 
-  # Create key dir and generate key
   mkdir -p "$key_dir"
 
   local keygen_args=(-t ed25519 -N "" -f "$key_file")
@@ -224,7 +257,7 @@ cmd_create() {
   fi
 
   if ! ssh-keygen "${keygen_args[@]}"; then
-    echo "Error: ssh-keygen failed. Cleaning up..." >&2
+    printf 'Error: ssh-keygen failed. Cleaning up...\n' >&2
     rm -rf "$key_dir"
     exit 1
   fi
@@ -238,7 +271,7 @@ cmd_create() {
     "Private key : ${key_file}" \
     "Public key  : ${key_file}.pub"
 
-  echo ""
+  printf '\n'
   gum style --foreground 8 "Public key content:"
   cat "${key_file}.pub"
 }
@@ -249,44 +282,86 @@ cmd_create() {
 
 cmd_config() {
   local namespace_flag=""
+  local key_name_arg=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -n|--namespace) namespace_flag="${2:-}"; shift 2 ;;
-      -*) echo "Error: Unknown flag: $1" >&2; exit 1 ;;
-      *) echo "Error: Unexpected argument: $1" >&2; exit 1 ;;
+      -*) printf 'Error: Unknown flag: %s\n' "$1" >&2; exit 1 ;;
+      *) key_name_arg="$1"; shift ;;
     esac
   done
 
   local namespace
-  namespace="$(resolve_namespace "$namespace_flag" "$( [[ -z "$namespace_flag" ]] && echo true || echo false )")"
+  namespace="$(resolve_namespace "$namespace_flag" "$( [[ -z "$namespace_flag" ]] && printf true || printf false )")"
 
   local ssh_dir="$HOME/.ssh"
   local namespace_dir="${ssh_dir}/${namespace}"
-  local config_file="${namespace_dir}/.skey-config.yaml"
+  local ns_config_file="${namespace_dir}/.skey-config.yaml"
 
-  # Bootstrap ~/.ssh
+  # Bootstrap dirs
   if [[ ! -d "$ssh_dir" ]]; then
-    mkdir -p "$ssh_dir"
-    chmod 700 "$ssh_dir"
+    mkdir -p "$ssh_dir"; chmod 700 "$ssh_dir"
   fi
-
-  # Bootstrap namespace dir
   if [[ ! -d "$namespace_dir" ]]; then
-    mkdir -p "$namespace_dir"
-    chmod 700 "$namespace_dir"
+    mkdir -p "$namespace_dir"; chmod 700 "$namespace_dir"
   fi
 
-  # Create per-namespace config YAML if absent
-  if [[ ! -f "$config_file" ]]; then
-    printf 'namespace: %s\nhosts: []\n' "$namespace" > "$config_file"
+  # Namespace-level config
+  if [[ ! -f "$ns_config_file" ]]; then
+    printf 'namespace: %s\nhosts: []\n' "$namespace" > "$ns_config_file"
   fi
 
-  # Register in global state
   state_init
-  state_register "$namespace" "$config_file"
+  state_register "$namespace" "$ns_config_file"
 
-  # Update ~/.ssh/config managed block
+  # Per-key config wizard (only if key name given)
+  if [[ -n "$key_name_arg" ]]; then
+    local key_name="$key_name_arg"
+    local key_dir="${namespace_dir}/${key_name}"
+    local key_config="${key_dir}/.config.yaml"
+
+    if [[ ! -d "$key_dir" ]]; then
+      printf 'Error: Key directory not found: %s\n' "$key_dir" >&2
+      printf 'Run "skey create -n %s %s" first.\n' "$namespace" "$key_name" >&2
+      exit 1
+    fi
+
+    if [[ -f "$key_config" ]]; then
+      gum style --foreground 3 "Per-key config already exists at ${key_config}. Regenerating SSH config."
+    else
+      # Wizard
+      gum style --foreground 4 "Configuring key: ${namespace}/${key_name}"
+
+      local hostname=""
+      while [[ -z "$hostname" ]]; do
+        hostname="$(gum input --prompt "Hostname: " --placeholder "e.g. github.com" | tr -d '\r')"
+      done
+
+      local user port forward_agent server_alive
+      user="$(gum input --prompt "User: " --value "${USER:-root}" | tr -d '\r')"
+      port="$(gum input --prompt "Port: " --value "22" | tr -d '\r')"
+      forward_agent="$(gum choose --header "ForwardAgent:" "false" "true" | tr -d '\r')"
+      server_alive="$(gum input --prompt "ServerAliveInterval: " --value "60" | tr -d '\r')"
+
+      # Auto-derive alias and identity_file
+      local alias="${namespace}-${key_name}"
+      local identity_file="${key_dir}/id_ed25519"
+
+      # Write per-key .config.yaml (printf only, no echo, strip \r)
+      printf 'alias: %s\nhostname: %s\nuser: %s\nport: %s\nidentity_file: %s\nforward_agent: %s\nserver_alive_interval: %s\n' \
+        "$alias" \
+        "$hostname" \
+        "$user" \
+        "$port" \
+        "$identity_file" \
+        "$forward_agent" \
+        "$server_alive" \
+        | tr -d '\r' > "$key_config"
+    fi
+  fi
+
+  # Regenerate ~/.ssh/config managed block
   ssh_config_update
 
   gum style \
@@ -295,8 +370,96 @@ cmd_config() {
     --foreground 2 \
     "Namespace '${namespace}' configured!" \
     "" \
-    "Config file : ${config_file}" \
+    "$( [[ -n "$key_name_arg" ]] && printf 'Key config  : %s/%s/.config.yaml' "$namespace_dir" "$key_name_arg" || printf 'Namespace config : %s' "$ns_config_file" )" \
     "SSH config  : ${SSH_CONFIG_FILE} (managed block updated)"
+}
+
+# ===========================================================================
+# cmd_status
+# ===========================================================================
+
+cmd_status() {
+  local ssh_dir="$HOME/.ssh"
+
+  if [[ ! -f "$SKEY_STATE_FILE" ]]; then
+    gum style --foreground 3 "No namespaces configured. Run 'skey config' to get started."
+    exit 0
+  fi
+
+  local -a registered_namespaces=()
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^[[:space:]]{2}([a-zA-Z0-9_-]+):$ ]]; then
+      registered_namespaces+=("${BASH_REMATCH[1]}")
+    fi
+  done < "$SKEY_STATE_FILE"
+
+  local -a detected_namespaces=()
+  if [[ -d "$ssh_dir" ]]; then
+    for ns_dir in "$ssh_dir"/*/; do
+      [[ -d "$ns_dir" ]] || continue
+      local ns_name
+      ns_name="$(basename "$ns_dir")"
+      for key_dir in "$ns_dir"*/; do
+        if [[ -f "${key_dir}id_ed25519" ]]; then
+          detected_namespaces+=("$ns_name")
+          break
+        fi
+      done
+    done
+  fi
+
+  gum style \
+    --border rounded \
+    --padding "0 2" \
+    --bold \
+    "skey workspace status"
+  printf '\n'
+
+  if [[ ${#registered_namespaces[@]} -eq 0 ]]; then
+    gum style --foreground 8 "No registered namespaces."
+  else
+    for ns in "${registered_namespaces[@]}"; do
+      local -a keys=()
+      for key_path in "$ssh_dir/$ns"/*/id_ed25519; do
+        [[ -f "$key_path" ]] || continue
+        keys+=("$(basename "$(dirname "$key_path")")")
+      done
+
+      local key_list
+      if [[ ${#keys[@]} -eq 0 ]]; then
+        key_list="(no keys)"
+      else
+        key_list="${keys[*]}"
+        key_list="${key_list// /,  }"
+      fi
+
+      printf '%s  %s\n' "$(gum style --foreground 2 --bold "$ns")" "${key_list}"
+    done
+  fi
+
+  local -a unregistered=()
+  for ns in "${detected_namespaces[@]}"; do
+    local found=false
+    for reg in "${registered_namespaces[@]}"; do
+      [[ "$ns" == "$reg" ]] && found=true && break
+    done
+    [[ "$found" == false ]] && unregistered+=("$ns")
+  done
+
+  if [[ ${#unregistered[@]} -gt 0 ]]; then
+    printf '\n'
+    gum style --foreground 3 "Unregistered namespaces (run 'skey config -n <name>' to register):"
+    for ns in "${unregistered[@]}"; do
+      printf '  %s\n' "$ns"
+    done
+  fi
+
+  printf '\n'
+  if [[ -f "$SSH_CONFIG_FILE" ]] && grep -q "$SENTINEL_START" "$SSH_CONFIG_FILE" 2>/dev/null; then
+    gum style --foreground 2 "SSH config: synced ✓"
+  else
+    gum style --foreground 1 "SSH config: out of sync — run 'skey config'"
+  fi
 }
 
 # ===========================================================================
@@ -309,6 +472,7 @@ shift || true
 case "$SUBCOMMAND" in
   create) cmd_create "$@" ;;
   config) cmd_config "$@" ;;
+  status) cmd_status ;;
   help|--help|-h) cmd_help ;;
-  *) echo "Error: Unknown subcommand '${SUBCOMMAND}'. Run 'skey help' for usage." >&2; exit 1 ;;
+  *) printf 'Error: Unknown subcommand "%s". Run "skey help" for usage.\n' "$SUBCOMMAND" >&2; exit 1 ;;
 esac
