@@ -180,7 +180,7 @@ cmd_help() {
     "SUBCOMMANDS" \
     "  create [flags] [key-name]          Create a new SSH key" \
     "  config [-n <ns>] [key-name]        Configure namespace or key (picker if no args)" \
-    "  git-remote [-r <remote>]           Rewrite git remote URL to use skey alias" \
+    "  git-remote [-r <remote>] [<workspace> [<key>]]  Rewrite git remote URL to use skey alias" \
     "  status                             Show workspace overview" \
     "  help                               Show this help" \
     "" \
@@ -513,35 +513,46 @@ cmd_status() {
 
 cmd_git_remote() {
   local remote="origin"
+  local arg_workspace=""
+  local arg_key=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       -r) remote="${2:-}"; shift 2 ;;
       -*) printf 'Error: Unknown flag: %s\n' "$1" >&2; exit 1 ;;
-      *) printf 'Error: Unexpected argument: %s\n' "$1" >&2; exit 1 ;;
+      *)
+        if [[ -z "$arg_workspace" ]]; then
+          arg_workspace="$1"
+        elif [[ -z "$arg_key" ]]; then
+          arg_key="$1"
+        else
+          printf 'Error: Unexpected argument: %s\n' "$1" >&2; exit 1
+        fi
+        shift
+        ;;
     esac
   done
 
-  # 2.2 — must be inside a git repo
+  # must be inside a git repo
   if ! git rev-parse --is-inside-work-tree &>/dev/null; then
     gum style --foreground 3 "Not a git repository. Skipping."
     exit 0
   fi
 
-  # 2.3 — remote URL must exist
+  # remote URL must exist
   local remote_url
   if ! remote_url="$(git remote get-url "$remote" 2>/dev/null)"; then
     gum style --foreground 3 "Remote '${remote}' not found. Skipping."
     exit 0
   fi
 
-  # 2.4 — skip non-SSH URLs
+  # skip non-SSH URLs
   if [[ "$remote_url" =~ ^https?:// ]]; then
     gum style --foreground 3 "Remote URL is not SSH. Skipping."
     exit 0
   fi
 
-  # 2.5 — extract hostname from SCP-style or ssh:// URL
+  # extract hostname from SCP-style or ssh:// URL
   local hostname=""
   local url_path=""
   local url_user=""
@@ -562,9 +573,10 @@ cmd_git_remote() {
     exit 0
   fi
 
-  # 2.6 — find matching .config.yaml files by hostname
-  local -a matching_aliases=()
-  if [[ -f "$SKEY_STATE_FILE" ]]; then
+  # build list of workspace/key-name items from registered namespaces
+  _git_remote_list_workspace_keys() {
+    local filter_ns="${1:-}"
+    if [[ ! -f "$SKEY_STATE_FILE" ]]; then return; fi
     local cur_ns=""
     while IFS= read -r line; do
       if [[ "$line" =~ ^[[:space:]]{2}([a-zA-Z0-9_-]+):$ ]]; then
@@ -572,32 +584,97 @@ cmd_git_remote() {
         continue
       fi
       [[ -z "$cur_ns" ]] && continue
-      for key_config in "$HOME/.ssh/${cur_ns}"/*/.config.yaml; do
-        [[ -f "$key_config" ]] || continue
-        local cfg_host
-        cfg_host="$(yaml_get "$key_config" "hostname")"
-        if [[ "$cfg_host" == "$hostname" ]]; then
-          matching_aliases+=("$(yaml_get "$key_config" "alias")")
-        fi
+      [[ -n "$filter_ns" && "$cur_ns" != "$filter_ns" ]] && continue
+      for key_dir in "$HOME/.ssh/${cur_ns}"/*/; do
+        [[ -d "$key_dir" ]] || continue
+        local key_name
+        key_name="$(basename "$key_dir")"
+        printf '%s/%s\n' "$cur_ns" "$key_name"
       done
     done < "$SKEY_STATE_FILE"
-  fi
+  }
 
-  # 2.7 — no matches
-  if [[ ${#matching_aliases[@]} -eq 0 ]]; then
-    gum style --foreground 3 "No skey key found for hostname '${hostname}'. Skipping."
-    exit 0
-  fi
+  local chosen_alias=""
 
-  # 2.8 — single or multiple matches
-  local chosen_alias
-  if [[ ${#matching_aliases[@]} -eq 1 ]]; then
-    chosen_alias="${matching_aliases[0]}"
+  if [[ -n "$arg_workspace" && -n "$arg_key" ]]; then
+    # explicit workspace + key-name: validate directory exists
+    if [[ ! -d "$HOME/.ssh/${arg_workspace}/${arg_key}" ]]; then
+      printf "Error: Key '%s/%s' not found.\n" "$arg_workspace" "$arg_key" >&2
+      exit 1
+    fi
+    chosen_alias="${arg_workspace}-${arg_key}"
+
+  elif [[ -n "$arg_workspace" ]]; then
+    # workspace only: picker scoped to that namespace
+    local -a ws_items=()
+    while IFS= read -r item; do
+      ws_items+=("$item")
+    done < <(_git_remote_list_workspace_keys "$arg_workspace")
+
+    if [[ ${#ws_items[@]} -eq 0 ]]; then
+      gum style --foreground 3 "No keys found in workspace '${arg_workspace}'. Skipping."
+      exit 0
+    fi
+
+    local selected
+    selected="$(printf '%s\n' "${ws_items[@]}" | gum choose --header "Select key in '${arg_workspace}':" | tr -d '\r')"
+    if [[ -z "$selected" ]]; then
+      gum style --foreground 3 "No key selected. Skipping."
+      exit 0
+    fi
+    chosen_alias="${selected//\//-}"
+
   else
-    chosen_alias="$(printf '%s\n' "${matching_aliases[@]}" | gum choose --header "Multiple keys match '${hostname}'. Select alias:" | tr -d '\r')"
+    # no positional args: offer full picker if any keys registered
+    local -a all_items=()
+    while IFS= read -r item; do
+      all_items+=("$item")
+    done < <(_git_remote_list_workspace_keys)
+
+    if [[ ${#all_items[@]} -gt 0 ]]; then
+      local selected
+      selected="$(printf '%s\n' "${all_items[@]}" | gum choose --header "Select key:" | tr -d '\r')"
+      if [[ -z "$selected" ]]; then
+        gum style --foreground 3 "No key selected. Skipping."
+        exit 0
+      fi
+      chosen_alias="${selected//\//-}"
+    else
+      # no keys in workspace — fall through to hostname lookup
+      local -a matching_aliases=()
+      if [[ -f "$SKEY_STATE_FILE" ]]; then
+        local cur_ns=""
+        while IFS= read -r line; do
+          if [[ "$line" =~ ^[[:space:]]{2}([a-zA-Z0-9_-]+):$ ]]; then
+            cur_ns="${BASH_REMATCH[1]}"
+            continue
+          fi
+          [[ -z "$cur_ns" ]] && continue
+          for key_config in "$HOME/.ssh/${cur_ns}"/*/.config.yaml; do
+            [[ -f "$key_config" ]] || continue
+            local cfg_host
+            cfg_host="$(yaml_get "$key_config" "hostname")"
+            if [[ "$cfg_host" == "$hostname" ]]; then
+              matching_aliases+=("$(yaml_get "$key_config" "alias")")
+            fi
+          done
+        done < "$SKEY_STATE_FILE"
+      fi
+
+      if [[ ${#matching_aliases[@]} -eq 0 ]]; then
+        gum style --foreground 3 "No skey key found for hostname '${hostname}'. Skipping."
+        exit 0
+      fi
+
+      if [[ ${#matching_aliases[@]} -eq 1 ]]; then
+        chosen_alias="${matching_aliases[0]}"
+      else
+        chosen_alias="$(printf '%s\n' "${matching_aliases[@]}" | gum choose --header "Multiple keys match '${hostname}'. Select alias:" | tr -d '\r')"
+      fi
+    fi
   fi
 
-  # 2.9 — rewrite URL preserving format
+  # rewrite URL preserving format
   local new_url
   if [[ "$url_style" == "ssh" ]]; then
     new_url="ssh://${url_user}${chosen_alias}${url_path}"
@@ -605,10 +682,10 @@ cmd_git_remote() {
     new_url="${url_user}${chosen_alias}:${url_path}"
   fi
 
-  # 2.10 — apply
+  # apply
   git remote set-url "$remote" "$new_url"
 
-  # 2.11 — success output
+  # success output
   gum style \
     --border rounded \
     --padding "1 2" \
