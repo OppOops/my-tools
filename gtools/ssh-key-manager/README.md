@@ -52,6 +52,18 @@ skey create -n work github -C "work laptop"
 GTOOLS_SSH_NAMESPACE=clients skey create acme
 ```
 
+### Rewrite git remote to use skey alias
+
+```bash
+# Rewrite origin remote URL (replaces hostname with skey Host alias)
+skey git-remote
+
+# Target a different remote
+skey git-remote -r upstream
+```
+
+Rewrites `git@github.com:user/repo.git` → `git@work-github:user/repo.git` so SSH routes through your configured key. Skips silently if not in a git repo, remote is unset, URL is not SSH, or no matching skey key exists.
+
 ### Show workspace status
 
 ```bash
@@ -63,10 +75,10 @@ Shows all registered namespaces and their keys, any unregistered namespace direc
 ### Configure a namespace or key
 
 ```bash
-# Register a namespace and update ~/.ssh/config
+# No args — presents a workspace picker to select a key
 skey config
 
-# For a specific namespace
+# Register a specific namespace
 skey config -n personal
 
 # Configure a specific key — runs SSH connection wizard
